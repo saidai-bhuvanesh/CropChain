@@ -84,6 +84,9 @@ contract CropChain is Pausable, ReentrancyGuard, AccessControl {
     bytes32[] public allBatchIds;
 
     address public owner;
+    /// @dev Pending recipient of a two-step ownership transfer. Ownership only
+    ///      changes when this address calls acceptOwnership().
+    address public pendingOwner;
     uint256 public nextListingId;
     uint256 public twapWindow;
     uint256 public maxPriceDeviationBps;
@@ -93,6 +96,8 @@ contract CropChain is Pausable, ReentrancyGuard, AccessControl {
     event BatchRecalled(bytes32 indexed batchId, address indexed triggeredBy);
     event RoleUpdated(address indexed user, ActorRole role);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferInitiated(address indexed currentOwner, address indexed pendingOwner);
+    event OwnershipTransferCanceled(address indexed currentOwner, address indexed canceledPendingOwner);
     event ListingCreated(uint256 indexed listingId, bytes32 indexed batchId, address indexed seller, uint256 quantity, uint256 unitPriceWei);
     event ListingPurchased(uint256 indexed listingId, address indexed buyer, uint256 quantity, uint256 totalPaidWei);
     event SubBatchCreated(bytes32 indexed parentBatchId, bytes32 indexed subBatchId, address indexed owner, uint256 quantity);
@@ -169,12 +174,29 @@ contract CropChain is Pausable, ReentrancyGuard, AccessControl {
         emit RoleUpdated(user, role);
     }
 
+    /// @notice Initiates a two-step ownership transfer. The current owner stays in
+    ///         control until the proposed new owner calls acceptOwnership().
+    /// @param newOwner Address proposed to become the next owner.
     function transferOwnership(address newOwner) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         require(newOwner != address(0), "Invalid address");
         require(newOwner != owner, "Already owner");
 
+        pendingOwner = newOwner;
+        emit OwnershipTransferInitiated(owner, newOwner);
+    }
+
+    /// @notice Accepts ownership previously initiated via transferOwnership().
+    ///         Only the pending owner can call this. DEFAULT_ADMIN_ROLE and the
+    ///         legacy `owner`/`roles` state are finalized atomically on acceptance.
+    function acceptOwnership() external nonReentrant {
+        require(pendingOwner != address(0), "No pending transfer");
+        require(msg.sender == pendingOwner, "Not pending owner");
+
         address previousOwner = owner;
+        address newOwner = pendingOwner;
+
         owner = newOwner;
+        delete pendingOwner;
 
         // Transfer legacy admin role: clear old owner, elevate new owner
         roles[previousOwner] = ActorRole.None;
@@ -186,6 +208,15 @@ contract CropChain is Pausable, ReentrancyGuard, AccessControl {
         _grantRole(DEFAULT_ADMIN_ROLE, newOwner);
 
         emit OwnershipTransferred(previousOwner, newOwner);
+    }
+
+    /// @notice Cancels a pending two-step ownership transfer. Only the current
+    ///         owner can cancel an in-flight transfer.
+    function cancelOwnershipTransfer() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        require(pendingOwner != address(0), "No pending transfer");
+        address canceled = pendingOwner;
+        delete pendingOwner;
+        emit OwnershipTransferCanceled(owner, canceled);
     }
 
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {

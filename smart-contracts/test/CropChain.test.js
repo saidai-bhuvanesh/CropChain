@@ -303,10 +303,144 @@ describe("CropChain", function () {
         DEFAULT_ADMIN_ROLE,
     );
 
-    // Admin should be able to transfer
+    // Admin can initiate a transfer; ownership does NOT move yet
     await expect(cropChain.connect(owner).transferOwnership(other.address))
+      .to.emit(cropChain, "OwnershipTransferInitiated")
+      .withArgs(owner.address, other.address);
+    expect(await cropChain.owner()).to.equal(owner.address);
+    expect(await cropChain.pendingOwner()).to.equal(other.address);
+
+    // Pending owner accepts and finalizes
+    await expect(cropChain.connect(other).acceptOwnership())
       .to.emit(cropChain, "OwnershipTransferred")
       .withArgs(owner.address, other.address);
+    expect(await cropChain.owner()).to.equal(other.address);
+    expect(await cropChain.pendingOwner()).to.equal(ethers.ZeroAddress);
+  });
+
+  describe("Two-Step Ownership Transfer", function () {
+    it("Should not transfer ownership until acceptOwnership is called", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      // owner still owns, still has admin role; other does not
+      expect(await cropChain.owner()).to.equal(owner.address);
+      expect(await cropChain.hasRole(DEFAULT_ADMIN_ROLE, owner.address)).to.be.true;
+      expect(await cropChain.hasRole(DEFAULT_ADMIN_ROLE, other.address)).to.be.false;
+      expect(await cropChain.pendingOwner()).to.equal(other.address);
+    });
+
+    it("Should only allow the pending owner to accept ownership", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      await expect(
+        cropChain.connect(farmer).acceptOwnership(),
+      ).to.be.revertedWith("Not pending owner");
+      // owner (current) also cannot accept
+      await expect(
+        cropChain.connect(owner).acceptOwnership(),
+      ).to.be.revertedWith("Not pending owner");
+    });
+
+    it("Should revert acceptOwnership when no transfer is pending", async function () {
+      await expect(
+        cropChain.connect(other).acceptOwnership(),
+      ).to.be.revertedWith("No pending transfer");
+    });
+
+    it("Should reject zero address as new owner", async function () {
+      await expect(
+        cropChain.connect(owner).transferOwnership(ethers.ZeroAddress),
+      ).to.be.revertedWith("Invalid address");
+    });
+
+    it("Should reject transferring to the current owner", async function () {
+      await expect(
+        cropChain.connect(owner).transferOwnership(owner.address),
+      ).to.be.revertedWith("Already owner");
+    });
+
+    it("Should allow pending owner replacement and emit init event", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      // Replace pending owner with a different address
+      await expect(cropChain.connect(owner).transferOwnership(mandi.address))
+        .to.emit(cropChain, "OwnershipTransferInitiated")
+        .withArgs(owner.address, mandi.address);
+      expect(await cropChain.pendingOwner()).to.equal(mandi.address);
+
+      // original pending owner can no longer accept
+      await expect(
+        cropChain.connect(other).acceptOwnership(),
+      ).to.be.revertedWith("Not pending owner");
+
+      // new pending owner accepts
+      await expect(cropChain.connect(mandi).acceptOwnership())
+        .to.emit(cropChain, "OwnershipTransferred")
+        .withArgs(owner.address, mandi.address);
+      expect(await cropChain.owner()).to.equal(mandi.address);
+    });
+
+    it("Should finalize DEFAULT_ADMIN_ROLE and legacy role on acceptance", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      await cropChain.connect(other).acceptOwnership();
+      expect(await cropChain.hasRole(DEFAULT_ADMIN_ROLE, owner.address)).to.be.false;
+      expect(await cropChain.hasRole(DEFAULT_ADMIN_ROLE, other.address)).to.be.true;
+      expect(await cropChain.roles(owner.address)).to.equal(0); // ActorRole.None
+      expect(await cropChain.roles(other.address)).to.equal(6); // ActorRole.Admin
+    });
+
+    it("Should allow owner to cancel a pending transfer", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      await expect(cropChain.connect(owner).cancelOwnershipTransfer())
+        .to.emit(cropChain, "OwnershipTransferCanceled")
+        .withArgs(owner.address, other.address);
+      expect(await cropChain.pendingOwner()).to.equal(ethers.ZeroAddress);
+      // pending owner can no longer accept
+      await expect(
+        cropChain.connect(other).acceptOwnership(),
+      ).to.be.revertedWith("No pending transfer");
+      // owner still owns
+      expect(await cropChain.owner()).to.equal(owner.address);
+    });
+
+    it("Should protect cancelOwnershipTransfer with DEFAULT_ADMIN_ROLE", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      await expect(
+        cropChain.connect(farmer).cancelOwnershipTransfer(),
+      ).to.be.revertedWith(
+        "AccessControl: account" +
+          " " +
+          farmer.address.toLowerCase() +
+          " " +
+          "is missing role" +
+          " " +
+          DEFAULT_ADMIN_ROLE,
+      );
+    });
+
+    it("Should revert cancel when no transfer is pending", async function () {
+      await expect(
+        cropChain.connect(owner).cancelOwnershipTransfer(),
+      ).to.be.revertedWith("No pending transfer");
+    });
+
+    it("Should keep existing functionality working after a transfer", async function () {
+      await cropChain.connect(owner).transferOwnership(other.address);
+      await cropChain.connect(other).acceptOwnership();
+      // new owner can perform an admin-only action (pause)
+      await expect(cropChain.connect(other).pause())
+        .to.emit(cropChain, "Paused")
+        .withArgs(other.address);
+      // old owner can no longer pause
+      await expect(
+        cropChain.connect(owner).pause(),
+      ).to.be.revertedWith(
+        "AccessControl: account" +
+          " " +
+          owner.address.toLowerCase() +
+          " " +
+          "is missing role" +
+          " " +
+          DEFAULT_ADMIN_ROLE,
+      );
+    });
   });
 
   describe("Input Validation", function () {
